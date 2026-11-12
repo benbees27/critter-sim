@@ -1,0 +1,908 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Critter Sim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#120e1c;--panel:#1d1730;--line:#3a2f5c;--ink:#ece6ff;--dim:#8f86b3;--hi:#ffd45e;--ok:#6fe08a;--bad:#ff6a6a}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:8px/1.6 "Press Start 2P",ui-monospace,Consolas,monospace;overflow:hidden;user-select:none}
+button{font:inherit;color:inherit;background:#2a2146;border:2px solid var(--line);padding:6px 8px;cursor:pointer;border-radius:0}
+button:hover{border-color:var(--dim)}
+button.on{background:#4a3a8a;border-color:var(--hi)}
+#app{display:flex;height:100%}
+#main{flex:1;min-width:0;display:flex;flex-direction:column}
+#top{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:8px;background:var(--panel);border-bottom:2px solid var(--line)}
+#top h1{margin:0 10px 0 0;font-size:10px;color:var(--hi)}
+#stats{margin-left:auto;color:var(--dim)}
+#stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:#0a0710}
+#c{image-rendering:pixelated;touch-action:none;cursor:crosshair;box-shadow:0 0 0 3px var(--line)}
+#info{height:52px;padding:8px 12px;background:var(--panel);border-top:2px solid var(--line);display:flex;gap:16px;align-items:center;overflow:hidden;white-space:nowrap}
+#info b{color:var(--hi)}
+.bar{display:inline-block;width:56px;height:8px;background:#0c0916;border:1px solid var(--line);vertical-align:middle;margin:0 6px 0 4px}
+.bar i{display:block;height:100%}
+#side{width:268px;overflow-y:auto;background:var(--panel);border-left:2px solid var(--line);padding:8px}
+#side h2{font-size:8px;color:var(--hi);margin:12px 0 6px}
+#side h2:first-child{margin-top:2px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.tool{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:2px;padding:4px 2px;height:62px;min-width:0}
+.tool .ic{height:36px;display:flex;align-items:center}
+.tool canvas{image-rendering:pixelated}
+.tool .n{position:absolute;top:1px;right:3px;color:var(--ok)}
+.hint{color:var(--dim);margin-top:12px;line-height:1.9}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="main">
+    <div id="top">
+      <h1>CRITTER SIM</h1>
+      <button id="bPause">PAUSE</button>
+      <button class="sp on" data-s="1">1x</button><button class="sp" data-s="2">2x</button><button class="sp" data-s="4">4x</button>
+      <button id="bRain">RAIN</button>
+      <button id="bNew">NEW WORLD</button>
+      <button id="bClear">CLEAR</button>
+      <span id="stats"></span>
+    </div>
+    <div id="stage"><canvas id="c" width="480" height="272"></canvas></div>
+    <div id="info"></div>
+  </div>
+  <div id="side"></div>
+</div>
+<script>
+'use strict';
+const W=480,H=272,T=8,GW=W/T,GH=H/T,STEP=1/30,MAXA=320;
+const $=s=>document.querySelector(s),cv=$('#c'),g=cv.getContext('2d');
+const rnd=(a,b)=>a+Math.random()*(b-a),ri=(a,b)=>Math.floor(rnd(a,b+1)),hyp=Math.hypot;
+
+/* ================= SPRITES =================
+   Legend: . empty  k outline  a base  b shade  c light  d accent  e accent2  w white  p pupil
+   Every creature is drawn facing right; the left-facing and upside-down (corpse) versions are baked automatically. */
+const SHARED={w:'#ffffff',p:'#1b1026'};
+const rows=s=>s.trim().split('\n').map(r=>r.trim());
+function bake(r,pal,id){
+  const w=Math.max(...r.map(x=>x.length)),h=r.length;
+  const col={...SHARED,k:pal[0],a:pal[1],b:pal[2],c:pal[3],d:pal[4],e:pal[5]};
+  const mk=()=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+  const R=mk(),L=mk(),D=mk(),gr=R.getContext('2d'),gl=L.getContext('2d'),gd=D.getContext('2d');
+  r.forEach((row,y)=>{
+    if(row.length!==w)console.warn('ragged sprite row',id,y,row.length,'/',w);
+    [...row].forEach((ch,x)=>{
+      if(ch==='.')return;
+      const c=col[ch];if(!c){console.warn('bad sprite char',id,ch);return}
+      gr.fillStyle=gl.fillStyle=gd.fillStyle=c;
+      gr.fillRect(x,y,1,1);gl.fillRect(w-1-x,y,1,1);gd.fillRect(x,h-1-y,1,1);
+    });
+  });
+  gd.globalCompositeOperation='source-atop';gd.fillStyle='rgba(70,70,84,.55)';gd.fillRect(0,0,w,h);
+  return{r:R,l:L,d:D,w,h};
+}
+const SP={};
+/* def(id, traits, palette[k,a,b,c,d,e], sprite). Add a row here and it shows up in the toolbar and joins the ecosystem. */
+function def(id,o,pal,spr){SP[id]={id,kind:'animal',tags:[],diet:[],hab:'land',size:1,litter:1,...o,...bake(rows(spr),pal,id)}}
+
+/* ---- prey / grazers ---- */
+def('soot',{name:'Soot',tags:['spirit','rodent'],spd:22,met:.02,life:150,mature:8,cd:40,litter:2,sight:50,diet:['plant','berry']},
+['#0d0914','#2b2236','#1a1324','#4b3f5c','#fff','#fff'],`
+.k..k..k.
+..kaaak..
+.kaaaaak.
+kaawaawak
+kaaaaaaak
+.kaaaaak.
+..kbkbk..
+.k.k.k.k.`);
+def('mouse',{name:'Mouse',tags:['rodent'],spd:16,met:.02,life:180,mature:10,cd:40,litter:2,sight:55,diet:['plant','berry']},
+['#2b1b3d','#a066c0','#74429a','#cf94e2','#f5aebf','#f5aebf'],`
+......kk.....
+.....kddk....
+..kkkkddkkkk.
+.kaaaaaaaaaak
+kaacaaaaaapak
+kaaaaaaaaaadk
+.kbbaaaaaabk.
+e.kkbkkkbkk..
+ee..kk..kk...`);
+def('chicken',{name:'Chick',size:2,tags:['bird'],spd:14,met:.016,life:220,mature:14,cd:28,litter:2,sight:55,diet:['plant','berry']},
+['#3a3040','#f4f1ea','#c9c3d4','#fff','#e84c3c','#f5b73a'],`
+.......dd...
+......kddk..
+.....kaaaakk
+.kk..kaapkee
+kaakkkaaakk.
+kaaaabbaaak.
+kaaacaaaaabk
+.kaaaaaaabk.
+..kbbbbbbk..
+...kk.kk....
+....e..e....`);
+def('slime',{name:'Slime',tags:['slime'],hab:'both',asexual:true,spd:8,met:.012,life:200,mature:10,cd:35,sight:40,diet:['plant','meat']},
+['#0f3d44','#3fd0c0','#27a39d','#8ff0e0','#fff','#fff'],`
+....kkkk....
+..kkaaaakk..
+.kaaccaaaak.
+.kaccaaaaak.
+kaaaaaaaaaak
+kaaapaaapaak
+kaaaaakkaaak
+kbaaaaaaaabk
+.kbbbbbbbbk.
+..kkkkkkkk..`);
+def('turtle',{name:'Shell',size:3,tags:['reptile'],tough:1.8,spd:8,met:.008,life:400,mature:30,cd:55,sight:50,diet:['plant','berry']},
+['#1f3a14','#8cc63e','#5f9a2a','#c2e86a','#7a4a22','#a8682c'],`
+....kkkkkkkk....
+..kkddeeddeekk..
+.kddeeddeeddeek.
+kddeeddeeddeekkk
+kkbbbbbbbbbbkaak
+.kkaaaaaaaaakapk
+..kkaaaaaakkaaak
+...kaakkkaakkkkk
+..kaaak..kaaak..
+..kkkkk..kkkkk..`);
+def('shroomie',{name:'Shroomie',size:2,tags:['fungus'],spd:7,met:.01,life:300,mature:20,cd:45,sight:40,diet:['plant','meat']},
+['#4a1f24','#d6403a','#a02a2c','#fff','#f6e4c0','#e8c08a'],`
+....kkkk....
+..kkaaaakk..
+.kaaaaccaak.
+kaaccaaaaaak
+kaaccaabbaak
+.kkbbbbbbkk.
+..kddpddpk..
+..kddddddk..
+..kddddddk..
+...kkddkk...
+..kee..kee..
+..kkk..kkk..`);
+def('bat',{name:'Bat',tags:['bat'],hab:'fly',spd:26,met:.02,life:160,mature:8,cd:25,sight:70,diet:['berry','meat']},
+['#24123a','#7a4ab0','#55307f','#a67ad6','#f5aebf','#ffd84a'],`
+kk..k....k..kk
+kakkdk..kdkkak
+kaaakaaaakaaak
+.kaaaapaapaak.
+..kkaaaaaakk..
+....kaddak....
+.....kkkk.....`);
+
+/* ---- land predators ---- */
+def('cat',{name:'Cat',size:2,spd:19,met:.013,life:400,mature:15,cd:70,sight:75,hunger:.7,diet:['prey:rodent','prey:bird','prey:fish','meat']},
+['#2d2a38','#f1ece4','#bdb5c4','#fff','#f0a0b0','#8d849c'],`
+.........k..k.
+........kdkkdk
+........kaaaak
+...k....kaapak
+..kak..kkaaadk
+.kaek.kaaaaakk
+.kaekkaaaaaak.
+..kkkaaaaaaak.
+....kaaaaaabk.
+....kaabkaabk.
+....kaakkaak..
+....kkk.kkk...`);
+def('shiba',{name:'Shiba',size:3,spd:17,met:.013,life:450,mature:18,cd:80,litter:2,sight:80,diet:['prey:rodent','prey:bird','prey:slime','meat']},
+['#3a2210','#e0953c','#b86f26','#f7c474','#f6ecd8','#2a1a0c'],`
+..........k..k..
+.........kdkkdk.
+.........kaaaaak
+..kk.....kaapaak
+.kaak..kkkaaaadk
+kaaaakkaaaaaakk.
+kaaccaaaaaaaaak.
+.kaaaaaaaaaaaak.
+..kabbddddbbak..
+...kak.kak.kak..
+...kak.kak.kak..
+...kkk.kkk.kkk..`);
+def('fox',{name:'Fox',size:3,spd:19,met:.014,life:420,mature:18,cd:80,litter:2,sight:90,diet:['prey:rodent','prey:bird','prey:slime','meat']},
+['#3c1a0c','#ee7a2e','#c2531a','#fff3e0','#fff3e0','#2a1208'],`
+..........k..k..
+.........kdkkdk.
+.........kaaaaak
+.kkkk....kaapaak
+kaaaaakkkkaaaddk
+kcccaaakaaaaaakk
+kccaaaaaaaaaaaak
+.kaaaaaaaaaaaak.
+..kkaabbbbddaak.
+...kek.kek.kek..
+...kek.kek.kek..
+...kkk.kkk.kkk..`);
+def('snake',{name:'Snake',size:2,tags:['reptile'],spd:14,met:.008,life:400,mature:12,cd:40,litter:2,sight:55,diet:['prey:rodent','prey:bird']},
+['#12331a','#4fbf4a','#2f8a3a','#8fe070','#f2d24a','#e83a3a'],`
+...........kkkk.
+..........kaaaak
+..........kaapak
+...kkkkk..kaaaee
+..kaaaaakkkaaakk
+.kaadaadaadaakk.
+kaakkkbbbbbbkk..
+kakk.kkkkkkk....
+kk..............`);
+def('raptor',{name:'Raptor',size:4,spd:22,met:.012,life:500,mature:25,cd:70,sight:100,hunger:.7,diet:['prey:*','meat']},
+['#4a1408','#e04a2a','#a82e18','#f08a5a','#f6d24a','#fff'],`
+...........kkkk.
+..........kaaaak
+.........kaaaapk
+.........kaaaaak
+.........kwkwkwk
+..kk.....kkaaaak
+.kaakk...kaaaaak
+kaaaaaaaaaaabak.
+kaaaacaaaaaakk..
+.kkaaaaaddddak..
+...kkaaaddddak..
+.....kaaaaaabk..
+.....kabk.kabk..
+.....kaak.kaak..
+....kkkk.kkkkk..`);
+def('imp',{name:'Imp',size:2,tags:['demon'],burns:.06,fireproof:true,spd:17,met:.01,life:300,mature:15,cd:60,sight:70,diet:['prey:rodent','prey:slime','prey:spirit','meat']},
+['#2a0a14','#c9283a','#8c1a2c','#f06a5a','#f6d24a','#3a2a30'],`
+.d........d.
+.dk......kd.
+..kkkkkkkk..
+.kaaaaaaaak.
+.kawpaawpak.
+.kaaaaaaaak.
+.kaakwwkaak.
+..kkaaaakk..
+.kaaaaaaaak.
+kaakaccakaak
+.kk.kbbbk.kk
+....kaaak...
+..kaak..kaak
+..kaak..kaak
+..kkkk..kkkk`);
+def('dragon',{name:'Dragon',size:5,hab:'fly',tough:1.4,burns:.1,fireproof:true,spd:18,met:.008,life:500,mature:40,cd:120,sight:120,diet:['prey:*','meat']},
+['#4a3208','#f0b838','#c28820','#ffe27a','#d94a2a','#7fd0a0'],`
+d......k..k......d
+dd.....kddk.....dd
+ddd...kaaaak...ddd
+dedd..kpaapk..dded
+deedd.kaaaak.ddeed
+ddeddkaaaaaakddedd
+.ddedkaaaaaakdedd.
+..ddkaacaacaakdd..
+...dkaaaccaaakd...
+....kabbbbbbak....
+.....kaabbaak.....
+.....kakkkkak.....
+.....kk....kk.....`);
+def('snapper',{name:'Snapper',size:2,asexual:true,reach:13,spd:0,met:.004,life:500,mature:25,cd:60,sight:30,diet:['prey:*']},
+['#2a0a10','#d83048','#9a1c30','#f2707a','#2e8a2e','#1f6a22'],`
+..kkk..kkk..
+.kaaakkaaak.
+kaabaaaabaak
+kabkwkwkwbak
+kaabkkkkbaak
+.kaabbbbaak.
+..kkaaaakk..
+.....kddk...
+..kdk.kddk..
+.kddddkddk..
+...kkkkddkkk
+......kddk..
+.....kkddkk.`);
+
+/* ---- water life ---- */
+def('fish',{name:'Fish',tags:['fish'],hab:'water',spd:14,met:.016,life:160,mature:8,cd:28,litter:2,sight:45,diet:['plant','meat']},
+['#12304f','#4aa3e0','#2c74b8','#9ad6ff','#ffd84a','#fff'],`
+....kkkk....
+k..kaaaakk..
+kkkaaccaaakk
+kaaaaaaaapak
+kkkabbbbaakk
+k..kbbbbkk..
+....kkkk....`);
+def('whale',{name:'Whale',size:3,tags:['whale'],hab:'water',spd:12,met:.01,life:350,mature:30,cd:70,sight:80,diet:['prey:fish']},
+['#103a5c','#3aa0e0','#2872b0','#8fd6ff','#fff','#bfe8ff'],`
+k..k.....kkkk...
+kk.kk..kkaaaakk.
+.kkakkkaaaaaaaak
+..kaaaaaaaaaapak
+..kaaaaaaaaaakk.
+..kcccccccccck..
+..kkbccccccccbkk
+...kkbbbbbbbbkk.
+.....kkkkkkkk...`);
+def('angler',{name:'Angler',size:3,hab:'water',spd:10,met:.01,life:300,mature:25,cd:60,sight:70,diet:['prey:*']},
+['#0a1a3a','#2c4a9a','#1c2f70','#5a80d0','#ffe46a','#fff'],`
+..........dd..
+........kk.k..
+.....kkkaakk..
+...kkaaaaaaak.
+.kkaaaaaawpak.
+kaaaaaaaaaaakk
+kaabaaaakwkwkk
+.kaabbbbaaakk.
+..kkaabbbaakk.
+...kkkkkkkk...`);
+def('serpent',{name:'Serpent',size:4,hab:'water',spd:16,met:.01,life:400,mature:35,cd:90,sight:90,diet:['prey:*','meat']},
+['#0a2c3c','#2aa8c0','#177a96','#7ae0f0','#f0d84a','#fff'],`
+...........kkkk.
+..........kaaaak
+..........kapaak
+..........kaaddk
+....kkkk..kkaakk
+...kaaaakkkaaak.
+..kaaccaaaaaak..
+.kaaaaaakkkkk...
+kaabbaaak.......
+.kkkkkkkk.......`);
+
+/* ---- plants (spawn only on their tile type: 0 grass, 1 water) ---- */
+const P={kind:'plant'};
+def('grass',{...P,name:'Grass',edible:'plant',nutr:.35,grow:8,spread:9,crowd:3,cap:150,tile:0},
+['#1f4a18','#4aa83a','#2f7a28','#8fdc5a','#b6ec7a','#fff'],`
+...k..k.
+.k.kc.kc
+.kckckk.
+.kackak.
+kaackakk
+kaaaaaak`);
+def('bush',{...P,name:'Bush',edible:'berry',berries:3,grow:20,spread:45,crowd:2,cap:30,tile:0},
+['#1d4a1c','#3a9a3a','#2a6e2c','#6acf5a','#e8334a','#fff'],`
+....kkkkkk....
+..kkaaaaaakk..
+.kaaccaaaaaak.
+kaaaccaaaccaak
+kabaaaaaaaaabk
+kaaabaaaaabaak
+.kbaaaaaaaabk.
+..kkbbbbbbkk..
+....kkkkkk....`);
+def('daisy',{...P,name:'Daisy',edible:'plant',nutr:.3,grow:20,spread:25,crowd:3,cap:40,tile:0},
+['#1f4a18','#3a9a3a','#2a6e2c','#fff','#f2d24a','#fff'],`
+..kkkk..
+.kccccck
+kccddcck
+.kcddck.
+..kcck..
+...kak..
+.kkkak..
+...kak..
+...kak..`);
+def('mushroom',{...P,name:'Mushroom',edible:'plant',nutr:.45,grow:25,spread:30,crowd:3,cap:40,tile:0},
+['#3a1a1c','#d6403a','#a02a2c','#fff','#f2e0c8','#c8a888'],`
+..kkkk..
+.kaccak.
+kaaaaaak
+kbbbbbbk
+.kkddkk.
+..kddek.
+..kddek.
+.kkkkkk.`);
+def('lily',{...P,name:'Lily',edible:'plant',nutr:.35,grow:12,spread:12,crowd:3,cap:45,tile:1},
+['#14502e','#3fbf6a','#2a9050','#7be89a','#ff8fc0','#fff'],`
+...kddk...
+.kkaaaakk.
+kaacaaaaak
+.kkbbbbkk.
+...kkkk...`);
+def('meat',{kind:'item',name:'Meat'},
+['#4a1414','#e0605a','#b03a3a','#f8a49a','#f6ecd8','#fff'],`
+..kkkkk..
+.kaaaaak.
+kaaccaaak
+kaaaaaaak
+.kbbbbbk.
+..kkdkk..
+...kdk...
+.kdk.kdk.`);
+
+/* ---- power icons ---- */
+const ICON={
+  hand:bake(rows(`
+...k.k..
+.k.kwkwk
+kwkkwwwk
+kwwwwwwk
+.kwwwwwk
+..kwwwk.
+...kkk..`),['#2a2146','#fff','#fff','#fff','#fff','#fff'],'hand'),
+  bolt:bake(rows(`
+...kkk..
+..kddk..
+.kddk...
+kddddk..
+.kkddk..
+...kdk..
+..kdk...
+..kk....`),['#4a3200','#fff','#fff','#fff','#ffe14a','#fff'],'bolt'),
+  flame:bake(rows(`
+...k....
+..kdk...
+..kdek..
+.kdeeek.
+.kdeeek.
+.kdeeek.
+..kdek..
+...kk...`),['#4a0e0e','#fff','#fff','#fff','#ee4a1f','#ffd84a'],'flame'),
+  heart:bake(rows(`
+.kk..kk.
+kaakkaak
+kacaaaak
+kaaaaaak
+.kaaaak.
+..kaak..
+...kk...`),['#4a0e1c','#ff5a7a','#fff','#ffb0c0','#fff','#fff'],'heart'),
+  erase:bake(rows(`
+........
+...kkkk.
+..kddwwk
+.kddwwk.
+kddwwk..
+kwwwk...
+.kkk....`),['#2a2146','#fff','#fff','#fff','#ff8fb0','#fff'],'erase'),
+};
+
+/* default balance knobs; every species gets these unless it sets its own */
+for(const s of Object.values(SP)){s.reach??=6+s.size*1.5;s.hunger??=.65;s.cap??=[0,70,40,18,10,5][s.size];s.tough??=1}
+
+/* sanity check: a typo'd diet tag silently makes a species harmless, so shout about it */
+(function selfCheck(){
+  const tags=new Set(Object.values(SP).flatMap(s=>s.tags));
+  for(const s of Object.values(SP))for(const d of s.diet){
+    if(['plant','berry','meat','prey:*'].includes(d))continue;
+    if(!d.startsWith('prey:')||!tags.has(d.slice(5)))console.warn('bad diet entry',s.id,d);
+  }
+})();
+
+/* ================= WORLD ================= */
+// tile codes: 0 grass 1 water 2 sand 3 rock 4 ash (burnt grass); 9 = off-map
+const G=new Uint8Array(GW*GH),FIRE=new Float32Array(GW*GH);
+const idxAt=(x,y)=>x<0||y<0||x>=W||y>=H?-1:(y/T|0)*GW+(x/T|0);
+const tileAt=(x,y)=>{const i=idxAt(x,y);return i<0?9:G[i]};
+function enterable(s,t){
+  if(t===9)return false;
+  switch(s.hab){case'fly':return true;case'water':return t===1;case'both':return t!==3;default:return t===0||t===2||t===4}
+}
+function genWorld(){
+  G.fill(0);FIRE.fill(0);
+  const blob=(cx,cy,r,ph,fn)=>{for(let ty=0;ty<GH;ty++)for(let tx=0;tx<GW;tx++){
+    const a=Math.atan2(ty-cy,tx-cx),d=hyp(tx-cx,ty-cy);fn(tx,ty,d,r*(1+.28*Math.sin(3*a+ph)+.12*Math.sin(5*a+ph*2)))}};
+  for(let n=0;n<3;n++){
+    const cx=ri(8,GW-9),cy=ri(6,GH-7),r=rnd(3.5,6.5),ph=rnd(0,6);
+    blob(cx,cy,r,ph,(x,y,d,rr)=>{if(d<rr+1.6&&G[y*GW+x]===0)G[y*GW+x]=2});
+    blob(cx,cy,r,ph,(x,y,d,rr)=>{if(d<rr)G[y*GW+x]=1});
+  }
+  for(let n=0;n<5;n++){const cx=ri(3,GW-4),cy=ri(3,GH-4),r=rnd(1,2.2),ph=rnd(0,6);
+    blob(cx,cy,r,ph,(x,y,d,rr)=>{if(d<rr&&G[y*GW+x]===0)G[y*GW+x]=3})}
+}
+function ignite(i){
+  if(i<0||FIRE[i]>0)return;
+  if(G[i]===0)FIRE[i]=rnd(5,8);else if(G[i]===2||G[i]===4)FIRE[i]=rnd(1.5,2.5);
+}
+function updateTiles(dt){
+  for(let i=0;i<FIRE.length;i++){
+    if(FIRE[i]<=0)continue;
+    const grass=G[i]===0,tx=i%GW,ty=i/GW|0;
+    FIRE[i]-=dt*(rain?4:1);
+    if(grass&&FIRE[i]>0){
+      for(const[nx,ny]of[[tx+1,ty],[tx-1,ty],[tx,ty+1],[tx,ty-1]]){
+        if(nx<0||ny<0||nx>=GW||ny>=GH)continue;
+        const n=ny*GW+nx;if(G[n]===0&&FIRE[n]<=0&&Math.random()<dt*.45)ignite(n);
+      }
+    }
+    if(FIRE[i]<=0){FIRE[i]=0;if(grass)G[i]=4}
+  }
+  for(let n=0;n<20;n++){const i=ri(0,G.length-1);if(G[i]===4&&Math.random()<.1)G[i]=0} // ash grows back
+}
+
+/* ================= ENTITIES ================= */
+let E=[],nextId=1,simT=0,rain=false,speed=1,counts={};
+const FX=[];
+const fx=(type,x,y)=>FX.push({type,x,y,t:0,l:type==='bolt'?.3:type==='puff'?.5:1,s:Math.random()});
+const mhp=s=>(3+s.size*2.5)*s.tough;
+
+function spawn(id,x,y,adult=true){
+  const s=SP[id],e={id:nextId++,sp:s,k:s.kind,x,y,face:Math.random()<.5?1:-1,age:0,t:rnd(0,9)};
+  if(s.kind==='animal'){
+    Object.assign(e,{mhp:mhp(s),hp:mhp(s),food:rnd(.6,.95),stam:1,tired:false,cd:adult?rnd(5,s.cd):s.cd,atk:0,hurt:0,emT:0,give:0,chase:0,
+      thinkT:rnd(0,.3),lt:simT,wt:0,wx:0,wy:0,dx:0,dy:0,mode:'idle',tgt:null,bump:false});
+    e.age=adult?s.mature+rnd(0,s.life*.3):0;
+  }else if(s.kind==='plant'){e.age=adult?s.grow:0;e.sd=rnd(2,s.spread);e.berries=adult?(s.berries||0):0;e.bt=rnd(5,15)}
+  counts[id]=(counts[id]||0)+1;if(e.k==='animal')nAnimals++; // keep caps exact between recounts
+  E.push(e);return e;
+}
+const meat=(x,y)=>E.push({id:nextId++,k:'corpse',sp:SP.meat,x,y,nutr:.7,t:0});
+const canEat=(a,b)=>a!==b&&a.diet.some(d=>d==='prey:*'?b.size<a.size:d.startsWith('prey:')&&b.tags.includes(d.slice(5))&&b.size<=a.size);
+// a predator on the wrong terrain can still bite whatever is right at the shoreline
+const canReach=(p,y,d)=>enterable(p.sp,tileAt(y.x,y.y))||d<14+p.sp.size*1.5;
+const canBreed=e=>e.age>=e.sp.mature&&e.food>.7&&e.cd<=0&&e.hp>e.mhp*.6&&(counts[e.sp.id]||0)<e.sp.cap&&nAnimals<MAXA;
+let nAnimals=0;
+
+function die(e){
+  e.dead=true;
+  if(e.k==='animal'){E.push({id:nextId++,k:'corpse',sp:e.sp,x:e.x,y:e.y,nutr:.3+.15*e.sp.size,t:0});fx('puff',e.x,e.y-4)}
+}
+function breed(a,b){
+  const s=a.sp;
+  for(let i=ri(1,s.litter);i>0&&nAnimals<MAXA;i--){
+    const mx=b?(a.x+b.x)/2:a.x,my=b?(a.y+b.y)/2:a.y;
+    const ok=enterable(s,tileAt(mx,my));
+    const c=spawn(s.id,ok?mx+rnd(-4,4):a.x,ok?my+rnd(-3,3):a.y,false);c.food=.7;
+  }
+  a.food-=b?.3:.4;a.cd=s.cd*rnd(.8,1.2);
+  if(b){b.food-=.3;b.cd=s.cd*rnd(.8,1.2)}
+  fx('heart',a.x,a.y-s.h);
+}
+function bite(e,t){
+  const s=e.sp;
+  if(t.k==='plant'){
+    if(t.sp.edible==='berry'){t.berries--;e.food=Math.min(1,e.food+.3)}else{t.age=0;e.food=Math.min(1,e.food+t.sp.nutr)} // grazed plants regrow from the roots
+  }else if(t.k==='corpse'){
+    const take=Math.min(.3,t.nutr);e.food=Math.min(1,e.food+take);t.nutr-=take;if(t.nutr<=.02)t.dead=true;
+  }else{
+    if(Math.random()<.45)return; // prey dodged
+    t.hp-=2+s.size*1.8;t.hurt=.3;fx('puff',t.x,t.y-4);
+    if(t.hp<=0){die(t);e.food=Math.min(1,e.food+.1)}
+  }
+}
+
+function nearFire(e){
+  const tx=e.x/T|0,ty=e.y/T|0;let best=null,bd=28*28;
+  for(let y=ty-3;y<=ty+3;y++)for(let x=tx-3;x<=tx+3;x++){
+    if(x<0||y<0||x>=GW||y>=GH||FIRE[y*GW+x]<=0)continue;
+    const cx=x*T+4,cy=y*T+4,d=(cx-e.x)**2+(cy-e.y)**2;if(d<bd){bd=d;best={x:cx,y:cy}}
+  }
+  return best;
+}
+function nearestOk(e){
+  const tx=e.x/T|0,ty=e.y/T|0;
+  for(let r=1;r<=14;r++)for(let y=ty-r;y<=ty+r;y++)for(let x=tx-r;x<=tx+r;x++){
+    if(Math.max(Math.abs(x-tx),Math.abs(y-ty))!==r||x<0||y<0||x>=GW||y>=GH)continue;
+    if(enterable(e.sp,G[y*GW+x]))return{x:x*T+4,y:y*T+4};
+  }
+  return null;
+}
+const aim=(e,x,y)=>{const d=hyp(x-e.x,y-e.y)||1;e.dx=(x-e.x)/d;e.dy=(y-e.y)/d};
+const away=(e,x,y)=>aim(e,2*e.x-x,2*e.y-y);
+const foodPlant=(s,o)=>o.age>=o.sp.grow&&(o.sp.edible==='plant'?s.diet.includes('plant'):s.diet.includes('berry')&&o.berries>0);
+
+/* The brain: danger > hunger > mating > wandering. Nothing is species-specific; behaviour falls out of size/diet/tags. */
+function think(e){
+  const s=e.sp,dt=simT-e.lt;e.lt=simT;
+  if(s.spd===0){ // ambusher: sits still and bites whatever wanders into reach
+    e.tgt=null;e.mode='idle';
+    if(e.food<.7){let bd=s.reach+4;for(const o of E){if(o.k!=='animal'||o===e||o.dead)continue;const d=hyp(o.x-e.x,o.y-e.y);if(d<bd&&canEat(s,o.sp)){bd=d;e.tgt=o}}}
+    return;
+  }
+  e.dx=e.dy=0;e.tgt=null;
+  if(!enterable(s,tileAt(e.x,e.y))){const p=nearestOk(e);if(p)aim(e,p.x,p.y);e.mode='flee';return}
+  const fire=s.fireproof?null:nearFire(e);
+  if(fire){away(e,fire.x,fire.y);if(e.mode!=='flee')e.emT=0;e.mode='flee';if(e.emT<=0){fx('excl',e.x,e.y-s.h);e.emT=2}return}
+  const hungry=e.food<s.hunger,ready=canBreed(e);
+  let thr=null,td=1e9,food=null,fd=1e9,mate=null,md=1e9,sx=0,sy=0;
+  for(const o of E){
+    if(o===e||o.dead)continue;
+    const d=hyp(o.x-e.x,o.y-e.y);if(d>s.sight*2.5)continue;
+    if(o.k==='animal'){
+      if(ready&&o.sp===s&&d<md&&canBreed(o)){mate=o;md=d} // mates find each other from far beyond normal sight
+      if(d>s.sight)continue;
+      if(d<7){sx+=(e.x-o.x)/(d+.1);sy+=(e.y-o.y)/(d+.1)}
+      if(o.sp.spd>0&&d<s.sight*.7&&d<td&&canEat(o.sp,s)&&canReach(o,e,d)){thr=o;td=d}
+      if(hungry&&e.give<=0&&d<fd&&canEat(s,o.sp)&&canReach(e,o,d)){food=o;fd=d}
+    }else if(d<=s.sight&&hungry&&d<fd){
+      if(o.k==='plant'?foodPlant(s,o):s.diet.includes('meat')){food=o;fd=d}
+    }
+  }
+  if(thr){away(e,thr.x,thr.y);if(e.mode!=='flee'&&e.emT<=0){fx('excl',e.x,e.y-s.h);e.emT=2}e.mode='flee';return}
+  if(food){
+    if(food.k==='animal'){e.chase+=dt;if(e.chase>8){e.give=5;e.chase=0;food=null}}else e.chase=0;
+  }else e.chase=0;
+  if(food){e.tgt=food;aim(e,food.x,food.y);e.mode='seek';return}
+  if(mate){e.tgt=mate;aim(e,mate.x,mate.y);e.mode='mate';return}
+  e.wt-=dt;
+  if(e.wt<=0||e.bump){
+    e.bump=false;
+    if(Math.random()<.3){e.idle=true;e.wt=rnd(1,3)}
+    else{e.idle=false;const a=rnd(0,6.28);e.wx=Math.cos(a);e.wy=Math.sin(a);e.wt=rnd(1.5,4)}
+  }
+  if(e.idle){e.mode='idle';return}
+  e.mode='wander';
+  const x=e.wx+sx*.5,y=e.wy+sy*.5,n=hyp(x,y)||1;e.dx=x/n;e.dy=y/n;
+}
+function canStep(e,x,y){const t=tileAt(x,y);return t!==9&&(enterable(e.sp,t)||!enterable(e.sp,tileAt(e.x,e.y)))}
+function move(e,dt){
+  const s=e.sp;if(!s.spd)return;
+  if(e.mode==='seek'&&e.tgt&&hyp(e.tgt.x-e.x,e.tgt.y-e.y)<=s.reach*.8)return; // close enough, hold and bite
+  let m;
+  switch(e.mode){case'wander':m=.55;break;case'seek':m=e.tgt&&e.tgt.k==='animal'?1.25:.9;break;case'flee':m=1.3;break;case'mate':m=.8;break;default:m=0}
+  if(m>1)e.stam=Math.max(0,e.stam-.22*dt);else e.stam=Math.min(1,e.stam+.12*dt);
+  if(e.stam<=0)e.tired=true;else if(e.stam>.4)e.tired=false;
+  if(e.tired&&m>.6)m=.6;
+  if(e.age<s.mature)m*=.8;
+  const v=s.spd*m*dt;if(!v)return;
+  const nx=e.x+e.dx*v,ny=e.y+e.dy*v,okx=canStep(e,nx,e.y),oky=canStep(e,e.x,ny);
+  if(okx)e.x=nx;if(oky)e.y=ny;
+  if(!okx&&!oky){e.bump=true;e.thinkT=0}
+  if(e.dx>.15)e.face=1;else if(e.dx<-.15)e.face=-1;
+}
+function act(e){
+  const s=e.sp,t=e.tgt;
+  if(s.asexual&&canBreed(e)){breed(e);return}
+  if(!t||t.dead)return;
+  const d=hyp(t.x-e.x,t.y-e.y);
+  if((e.mode==='seek'||s.spd===0)&&d<=s.reach){if(e.atk<=0){e.atk=.7;bite(e,t)}}
+  else if(e.mode==='mate'&&d<9&&t.k==='animal'&&canBreed(e)&&canBreed(t))breed(e,t);
+}
+function stepAnimal(e,dt){
+  if(e===grabbed){e.mode='idle';return}
+  const s=e.sp;
+  e.age+=dt;e.food-=s.met*dt*(e.mode==='idle'?.6:1);e.cd-=dt;e.atk-=dt;e.hurt-=dt;e.emT-=dt;e.give-=dt;
+  const i=idxAt(e.x,e.y),tl=i<0?9:G[i];
+  if(e.food<=0){e.food=0;e.hp-=.5*dt}else if(e.food>.5&&e.hp<e.mhp)e.hp=Math.min(e.mhp,e.hp+.15*dt);
+  if(e.age>s.life)e.hp-=1.2*dt;
+  if(!enterable(s,tl))e.hp-=(s.hab==='water'?1.2:.35)*dt; // stranded fish flop, swimming dogs tire
+  if(i>=0&&FIRE[i]>0&&!s.fireproof){e.hp-=2.2*dt;e.hurt=.2}
+  if(s.burns&&i>=0&&Math.random()<dt*s.burns)ignite(i);
+  if(e.hp<=0)return die(e);
+  if((e.thinkT-=dt)<=0){think(e);e.thinkT=rnd(.18,.32)}
+  move(e,dt);act(e);
+}
+function stepPlant(p,dt){
+  const s=p.sp,i=idxAt(p.x,p.y);
+  if(i<0||FIRE[i]>0||G[i]!==s.tile){p.dead=true;return} // burnt, or terrain painted out from under it
+  const k=rain?2.2:1;p.age+=dt*k;
+  if(p.age<s.grow)return;
+  if(s.berries&&p.berries<s.berries){p.bt-=dt*k;if(p.bt<=0){p.berries++;p.bt=rnd(12,20)}}
+  if((p.sd-=dt*k)<=0){
+    p.sd=s.spread*rnd(.7,1.4);
+    if((counts[s.id]||0)>=s.cap)return;
+    const a=rnd(0,6.28),r=rnd(10,26),x=p.x+Math.cos(a)*r,y=p.y+Math.sin(a)*r;
+    if(tileAt(x,y)!==s.tile)return;
+    let n=0;for(const o of E)if(o.sp===s&&hyp(o.x-x,o.y-y)<22)n++;
+    if(n<s.crowd)spawn(s.id,x,y,false);
+  }
+}
+function stepCorpse(c,dt){
+  if((c.t+=dt)>(c.sp.kind==='item'?60:40)){
+    c.dead=true; // rotted: fertilises the ground
+    if(tileAt(c.x,c.y)===0&&(counts.grass||0)<SP.grass.cap&&Math.random()<.6)spawn(Math.random()<.35?'mushroom':'grass',c.x+rnd(-3,3),c.y,false);
+  }
+}
+function update(dt){
+  simT+=dt;updateTiles(dt);
+  for(const e of E){
+    if(e.dead)continue;
+    if(e.k==='animal')stepAnimal(e,dt);else if(e.k==='plant')stepPlant(e,dt);else stepCorpse(e,dt);
+  }
+  E=E.filter(e=>!e.dead);
+  for(const f of FX)f.t+=dt;
+  for(let i=FX.length-1;i>=0;i--)if(FX[i].t>=FX[i].l)FX.splice(i,1);
+  if(flash>0)flash-=dt;
+  if((statT-=dt)<=0){statT=.5;recount()}
+}
+let statT=0,flash=0;
+function recount(){
+  counts={};nAnimals=0;let pl=0;
+  for(const e of E){if(e.k==='corpse')continue;counts[e.sp.id]=(counts[e.sp.id]||0)+1;if(e.k==='animal')nAnimals++;else pl++}
+  $('#stats').textContent=`ANIMALS ${nAnimals}  PLANTS ${pl}`;
+  for(const[id,el]of Object.entries(badges))el.textContent=counts[id]||'';
+}
+
+/* ================= POPULATE ================= */
+function spot(s){for(let n=0;n<80;n++){const x=rnd(8,W-8),y=rnd(12,H-4),t=tileAt(x,y);if(s.kind==='plant'?t===s.tile:enterable(s,t)&&t!==3)return[x,y]}return null}
+function populate(spec){for(const[id,n]of Object.entries(spec))for(let i=0;i<n;i++){const p=spot(SP[id]);if(p)spawn(id,p[0],p[1])}}
+function newWorld(){
+  E=[];counts={};nAnimals=0;FX.length=0;sel=grabbed=null;genWorld();
+  populate({grass:60,bush:8,daisy:10,mushroom:5,lily:14,
+    soot:8,mouse:12,chicken:8,slime:6,turtle:3,shroomie:3,bat:3,cat:2,shiba:2,fox:3,snake:2,fish:12,whale:1,angler:1});
+  recount();
+}
+
+/* ================= RENDER ================= */
+const hash=(x,y)=>((x*73856093)^(y*19349663))>>>0;
+function drawTile(c,t,tx,ty,px,py,fr){
+  const h=hash(tx,ty),f=(a,x,y,w,hh)=>{c.fillStyle=a;c.fillRect(px+x,py+y,w,hh)};
+  switch(t){
+    case 0:f((tx+ty)&1?'#58a644':'#52a03e',0,0,T,T);if(!(h&3))f('#3f8a32',h>>3&7,h>>6&6,1,2);if(!(h&15))f('#86d060',h>>9&7,h>>12&7,1,1);break;
+    case 1:f((tx+ty)&1?'#3a78d4':'#3571cb',0,0,T,T);if((h+fr)%6===0)f('#7fb3f0',1+(h&3),2+(h>>2&3),3,1);break;
+    case 2:f((tx+ty)&1?'#e0c987':'#d8bf7c',0,0,T,T);if(!(h&3))f('#c2a763',h>>3&7,h>>6&7,1,1);break;
+    case 3:f('#7c7a8c',0,0,T,T);f('#a09eb4',0,0,T,1);f('#4e4c5e',0,T-2,T,2);if(h&1)f('#65637a',h>>3&5,h>>6&3+2,2,1);break;
+    case 4:f((tx+ty)&1?'#403840':'#383038',0,0,T,T);if(!(h&3))f('#5a4f58',h>>3&7,h>>6&7,1,1);break;
+  }
+}
+const FLAME=['#e8431f','#ff9a2e','#ffe45a'];
+function drawFire(tx,ty){
+  const fr=simT*9|0;
+  for(let i=0;i<4;i++){
+    const hh=3+hash(tx+i,ty*7+fr)%5,x=tx*T+1+i*2,y=ty*T+T;
+    g.fillStyle=FLAME[0];g.fillRect(x,y-hh,2,hh);
+    g.fillStyle=FLAME[1];g.fillRect(x,y-hh+1,2,Math.max(1,hh-2));
+    if(hh>4){g.fillStyle=FLAME[2];g.fillRect(x,y-2,2,2)}
+  }
+}
+const HEART=[[1,0],[3,0],[0,1],[1,1],[2,1],[3,1],[4,1],[0,2],[1,2],[2,2],[3,2],[4,2],[1,3],[2,3],[3,3],[2,4]];
+function drawFX(f){
+  const p=f.t/f.l;
+  if(f.type==='heart'){g.fillStyle='#ff5a7a';for(const[x,y]of HEART)g.fillRect(Math.round(f.x-2+x),Math.round(f.y-f.t*10+y),1,1)}
+  else if(f.type==='excl'){g.fillStyle='#ffe14a';const x=Math.round(f.x),y=Math.round(f.y-3-p*3);g.fillRect(x,y-4,2,4);g.fillRect(x,y+1,2,1)}
+  else if(f.type==='puff'){g.fillStyle=`rgba(255,255,255,${1-p})`;for(let i=0;i<4;i++){const a=i*1.6+f.s*6;g.fillRect(Math.round(f.x+Math.cos(a)*p*7),Math.round(f.y+Math.sin(a)*p*7),2,2)}}
+  else if(f.type==='bolt'){
+    g.fillStyle='#fff6a0';let x=f.x+rnd(-6,6);
+    for(let y=0;y<f.y;y+=6){const nx=y+6>=f.y?f.x:f.x+rnd(-7,7);g.fillRect(Math.round(Math.min(x,nx)),y,Math.abs(nx-x)+2,6);x=nx}
+  }
+}
+function drawE(e){
+  const s=e.sp;let img,sc=1,bob=0,lift=0;
+  if(e.k==='corpse')img=s.kind==='item'?s.r:s.d;
+  else{
+    img=e.face<0?s.l:s.r;
+    if(e.age<(e.k==='plant'?s.grow:s.mature))sc=.5;
+    if(e.k==='animal'){
+      if(e.mode!=='idle'&&s.spd>0&&e!==grabbed)bob=-(Math.abs(Math.sin(simT*14+e.id))*1.6|0);
+      if(s.hab==='fly')lift=5+Math.sin(simT*5+e.id)*1.5;
+      if(e===grabbed)lift=8;
+    }
+  }
+  const w=Math.round(s.w*sc),h=Math.round(s.h*sc),x=Math.round(e.x-w/2),y=Math.round(e.y-h-lift+bob);
+  if(e.k!=='plant'){g.fillStyle='rgba(0,0,0,.25)';g.fillRect(Math.round(e.x-w*.35),Math.round(e.y-1),Math.round(w*.7),2)}
+  if(e.hurt>0&&(simT*20&1))g.globalAlpha=.45;
+  g.drawImage(img,x,y,w,h);g.globalAlpha=1;
+  if(e.k==='plant'&&e.berries>0){g.fillStyle='#e8334a';for(let i=0;i<e.berries;i++)g.fillRect(x+3+i*3,y+2+(i&1)*3,2,2)}
+  if(e.k==='animal'&&e.hp<e.mhp-.01){g.fillStyle='#000';g.fillRect(x,y-4,w,2);g.fillStyle=e.hp/e.mhp>.4?'#6fe08a':'#ff6a6a';g.fillRect(x,y-4,Math.max(1,Math.round(w*e.hp/e.mhp)),2)}
+}
+function draw(){
+  const fr=simT*2|0;
+  for(let ty=0;ty<GH;ty++)for(let tx=0;tx<GW;tx++)drawTile(g,G[ty*GW+tx],tx,ty,tx*T,ty*T,fr);
+  for(let i=0;i<FIRE.length;i++)if(FIRE[i]>0)drawFire(i%GW,i/GW|0);
+  const key=e=>e.y-(e.k==='corpse'?1000:0);
+  for(const e of[...E].sort((a,b)=>key(a)-key(b)))drawE(e);
+  for(const f of FX)drawFX(f);
+  if(rain){g.fillStyle='rgba(20,30,70,.18)';g.fillRect(0,0,W,H);g.fillStyle='rgba(170,200,255,.7)';for(let i=0;i<70;i++)g.fillRect(rnd(0,W)|0,rnd(0,H)|0,1,3)}
+  if(flash>0){g.fillStyle=`rgba(255,255,255,${flash*2.5})`;g.fillRect(0,0,W,H)}
+  if(mouse.in){ // tool preview
+    if(tool.t==='spawn'){const s=SP[tool.arg];g.globalAlpha=.55;g.drawImage(s.r,Math.round(mouse.x-s.w/2),Math.round(mouse.y-s.h),s.w,s.h);g.globalAlpha=1}
+    else if(tool.t==='terrain'||tool.t==='torch'){const r=tool.t==='terrain'?brush:0;g.strokeStyle='#fff';g.lineWidth=1;g.strokeRect((mouse.x/T|0)*T-r*T+.5,(mouse.y/T|0)*T-r*T+.5,(2*r+1)*T-1,(2*r+1)*T-1)}
+  }
+  const c=sel&&!sel.dead?sel:null;
+  if(c){
+    const w=c.sp.w,h=c.sp.h,x=Math.round(c.x-w/2)-2,y=Math.round(c.y-h)-2,L=3;g.fillStyle='#fff';
+    for(const[bx,by,sx,sy]of[[x,y,1,1],[x+w+3,y,-1,1],[x,y+h+3,1,-1],[x+w+3,y+h+3,-1,-1]]){g.fillRect(bx,by,sx*L,1);g.fillRect(bx,by,1,sy*L)}
+  }
+}
+
+/* ================= TOOLS / INPUT ================= */
+let tool={t:'grab'},brush=1,sel=null,grabbed=null,down=false,lastUse=0;
+const mouse={x:0,y:0,in:false};
+function nearest(x,y,r,animalsOnly){
+  let best=null,bd=r*r;
+  for(const e of E){
+    if(e.k==='corpse'&&animalsOnly)continue;
+    if(animalsOnly&&e.k!=='animal')continue;
+    const cy=e.y-e.sp.h/2,d=(e.x-x)**2+(cy-y)**2;if(d<bd){bd=d;best=e}
+  }
+  return best;
+}
+function paint(x,y,type){
+  const tx=x/T|0,ty=y/T|0;
+  for(let dy=-brush;dy<=brush;dy++)for(let dx=-brush;dx<=brush;dx++){
+    if(dx*dx+dy*dy>brush*brush+brush*.8)continue;
+    const X=tx+dx,Y=ty+dy;if(X<0||Y<0||X>=GW||Y>=GH)continue;
+    G[Y*GW+X]=type;FIRE[Y*GW+X]=0;
+  }
+}
+function useTool(p,first){
+  const now=performance.now(),rate=now-lastUse>140;
+  switch(tool.t){
+    case'grab':
+      if(first){grabbed=nearest(p.x,p.y,10,true);sel=grabbed||nearest(p.x,p.y,10,false)}
+      if(grabbed){grabbed.x=Math.min(W-2,Math.max(2,p.x));grabbed.y=Math.min(H-2,Math.max(10,p.y));grabbed.mode='idle';grabbed.tgt=null}
+      break;
+    case'spawn':
+      if(first||rate){
+        lastUse=now;const s=SP[tool.arg],j=first?0:6;
+        const x=p.x+rnd(-j,j),y=p.y+rnd(-j,j);
+        if(s.kind==='plant'){if(tileAt(x,y)===s.tile)spawn(s.id,x,y)}else if(nAnimals<MAXA&&(s.spd>0||enterable(s,tileAt(x,y))))spawn(s.id,x,y) // rooted things need valid ground
+      }
+      break;
+    case'meat':if(first||rate){lastUse=now;meat(p.x+(first?0:rnd(-6,6)),p.y)}break;
+    case'terrain':paint(p.x,p.y,+tool.arg);break;
+    case'torch':ignite(idxAt(p.x,p.y));break;
+    case'bolt':
+      if(first){
+        fx('bolt',p.x,p.y);flash=.18;
+        for(const o of E)if(o.k==='animal'&&hyp(o.x-p.x,o.y-p.y)<14){o.hp=0;die(o)}
+        const i=idxAt(p.x,p.y);ignite(i);
+        for(const d of[1,-1,GW,-GW])if(Math.random()<.5)ignite(i+d);
+      }
+      break;
+    case'heal':
+      if(rate){lastUse=now;for(const o of E)if(o.k==='animal'&&hyp(o.x-p.x,o.y-p.y)<22){o.hp=o.mhp;o.food=1;fx('heart',o.x,o.y-o.sp.h)}}
+      break;
+    case'erase':for(const o of E)if(hyp(o.x-p.x,o.y-p.y)<10)o.dead=true;break;
+  }
+}
+const pos=ev=>{const r=cv.getBoundingClientRect();return{x:(ev.clientX-r.left)*W/r.width,y:(ev.clientY-r.top)*H/r.height}};
+cv.addEventListener('pointerdown',ev=>{cv.setPointerCapture(ev.pointerId);down=true;Object.assign(mouse,pos(ev),{in:true});useTool(mouse,true)});
+cv.addEventListener('pointermove',ev=>{Object.assign(mouse,pos(ev),{in:true});if(down)useTool(mouse,false)});
+cv.addEventListener('pointerup',()=>{down=false;grabbed=null});
+cv.addEventListener('pointerleave',()=>{if(!down)mouse.in=false});
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+
+/* ================= UI ================= */
+const badges={};
+function icon(img,box){
+  const c=document.createElement('canvas');c.width=img.w;c.height=img.h;c.getContext('2d').drawImage(img.r,0,0);
+  const z=Math.max(1,Math.min(4,Math.floor(box/Math.max(img.w,img.h))));
+  c.style.width=img.w*z+'px';c.style.height=img.h*z+'px';return c;
+}
+function toolBtn(parent,label,img,data,badgeId){
+  const b=document.createElement('button');b.className='tool';b.dataset.t=data;
+  const ic=document.createElement('span');ic.className='ic';ic.append(icon(img,36));
+  const n=document.createElement('span');n.textContent=label;b.append(ic,n);
+  if(badgeId){const bd=document.createElement('span');bd.className='n';b.append(bd);badges[badgeId]=bd}
+  parent.append(b);return b;
+}
+function buildUI(){
+  const side=$('#side');
+  const section=(title,fn)=>{const h=document.createElement('h2');h.textContent=title;const gr=document.createElement('div');gr.className='grid';side.append(h,gr);fn(gr)};
+  const all=Object.values(SP);
+  section('CRITTERS',gr=>all.filter(s=>s.kind==='animal').forEach(s=>toolBtn(gr,s.name,s,'spawn:'+s.id,s.id)));
+  section('PLANTS',gr=>all.filter(s=>s.kind==='plant').forEach(s=>toolBtn(gr,s.name,s,'spawn:'+s.id,s.id)));
+  section('THINGS',gr=>toolBtn(gr,'Meat',SP.meat,'meat'));
+  section('TERRAIN',gr=>[['Grass',0],['Water',1],['Sand',2],['Rock',3]].forEach(([n,t])=>{
+    const c=document.createElement('canvas');c.width=c.height=T;drawTile(c.getContext('2d'),t,1,0,0,0,0);
+    toolBtn(gr,n,{r:c,w:T,h:T},'terrain:'+t);
+  }));
+  const bh=document.createElement('div');bh.className='grid';bh.style.marginTop='4px';
+  [['S',0],['M',1],['L',2]].forEach(([n,r])=>{const b=document.createElement('button');b.textContent='BRUSH '+n;b.dataset.b=r;if(r===brush)b.classList.add('on');bh.append(b)});
+  side.append(bh);
+  section('POWERS',gr=>[['Grab','hand','grab'],['Bolt','bolt','bolt'],['Torch','flame','torch'],['Heal','heart','heal'],['Erase','erase','erase']].forEach(([n,i,d])=>toolBtn(gr,n,ICON[i],d)));
+  const hint=document.createElement('div');hint.className='hint';
+  hint.innerHTML='Pick something, then click or hold on the world.<br>Grab: drag critters, click to inspect.<br>Space: pause.';
+  side.append(hint);
+  side.addEventListener('click',ev=>{
+    const b=ev.target.closest('button');if(!b)return;
+    if(b.dataset.b!==undefined){brush=+b.dataset.b;side.querySelectorAll('[data-b]').forEach(x=>x.classList.toggle('on',x===b));return}
+    const[t,arg]=b.dataset.t.split(':');tool={t,arg};
+    side.querySelectorAll('.tool').forEach(x=>x.classList.toggle('on',x===b));
+  });
+  side.querySelector('[data-t=grab]').classList.add('on');
+}
+const setSpeed=n=>{speed=n;$('#bPause').textContent=n?'PAUSE':'PLAY';document.querySelectorAll('.sp').forEach(b=>b.classList.toggle('on',n&&+b.dataset.s===n));if(n)lastSpeed=n};
+let lastSpeed=1;
+$('#bPause').onclick=()=>setSpeed(speed?0:lastSpeed);
+document.querySelectorAll('.sp').forEach(b=>b.onclick=()=>setSpeed(+b.dataset.s));
+$('#bRain').onclick=e=>{rain=!rain;e.target.classList.toggle('on',rain)};
+$('#bNew').onclick=newWorld;
+$('#bClear').onclick=()=>{E=[];FX.length=0;sel=grabbed=null;recount()};
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();$('#bPause').click()}});
+
+const STATE={wander:'wandering',idle:'resting',flee:'running away!',mate:'looking for a mate'};
+function describe(){
+  const e=sel&&!sel.dead?sel:null;
+  if(!e)return'<span>Drop critters, plants and fire into the world. Drag the hand to move things.</span>';
+  const s=e.sp,bar=(v,c)=>`<span class="bar"><i style="width:${Math.max(0,Math.min(1,v))*100}%;background:${c}"></i></span>`;
+  if(e.k==='plant')return`<b>${s.name}</b><span>${e.age<s.grow?'growing':s.berries?`${e.berries} berries`:'ready to eat'}</span>`;
+  if(e.k==='corpse')return`<b>${s.name}${s.kind==='item'?'':' remains'}</b><span>rotting, food for scavengers</span>`;
+  let st=STATE[e.mode]||'';
+  if(e.mode==='seek'&&e.tgt)st=e.tgt.k==='animal'?'hunting '+e.tgt.sp.name:e.tgt.k==='plant'?'foraging':'scavenging';
+  if(s.spd===0)st=e.tgt?'ambushing '+e.tgt.sp.name:'lying in wait';
+  return`<b>${s.name}</b>HP${bar(e.hp/e.mhp,'#6fe08a')}FOOD${bar(e.food,'#ffd45e')}<span>age ${e.age|0}s${e.age<s.mature?' (young)':''} - ${st}</span>`;
+}
+
+/* ================= LOOP ================= */
+function fit(){
+  const k=devicePixelRatio||1,st=$('#stage'),s=Math.min((st.clientWidth-14)/W,(st.clientHeight-14)/H),z=Math.max(1/k,Math.floor(s*k)/k);
+  cv.style.width=W*z+'px';cv.style.height=H*z+'px';
+}
+addEventListener('resize',fit);
+let acc=0,last=performance.now(),infoT=0;
+function loop(now){
+  acc+=Math.min(.25,(now-last)/1000)*speed;last=now;
+  for(let n=0;acc>=STEP&&n<8;n++,acc-=STEP)update(STEP);
+  if(acc>STEP*8)acc=0;
+  draw();
+  if((infoT-=1)<=0){infoT=6;$('#info').innerHTML=describe()}
+  requestAnimationFrame(loop);
+}
+buildUI();newWorld();fit();requestAnimationFrame(loop);
+window.sim={E:()=>E,SP,spawn,update,counts:()=>counts,newWorld,G,FIRE,setRain:v=>rain=v,die};
+</script>
+</body>
+</html>
